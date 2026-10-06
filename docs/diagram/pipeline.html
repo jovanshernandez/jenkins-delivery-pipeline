@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pipeline Stages</title>
+<style>
+  :root {
+    --bg: #ffffff; --ink: #1f2328; --muted: #59636e; --line: #d1d9e0;
+    --every: #1f6feb; --every-bg: #ddf4ff;
+    --master: #8250df; --master-bg: #fbefff;
+    --gate: #bf8700; --gate-bg: #fff8c5;
+    --deploy: #1a7f37; --deploy-bg: #dafbe1;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .wrap { padding: 28px 32px 24px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 22px; }
+  h1 { font-size: 20px; margin: 0; }
+  h1 code { font-size: 18px; }
+  .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; }
+  .flow { display: flex; align-items: center; gap: 0; }
+  .arrow { width: 18px; height: 2px; background: var(--line); position: relative; flex: none; }
+  .arrow::after { content: ""; position: absolute; right: -1px; top: -4px; border: 5px solid transparent; border-left: 7px solid #afb8c1; border-right: 0; }
+  .stage { border-radius: 8px; border: 1.5px solid; padding: 10px 12px; flex: 1 1 0; min-width: 0; min-height: 112px; }
+  .stage .n { font-size: 11px; font-weight: 600; opacity: .75; }
+  .stage .t { font-weight: 600; font-size: 14px; margin-top: 2px; }
+  .stage .d { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  .every { border-color: var(--every); background: var(--every-bg); }
+  .every .n { color: var(--every); }
+  .master { border-color: var(--master); background: var(--master-bg); }
+  .master .n { color: var(--master); }
+  .gate { border-color: var(--gate); background: var(--gate-bg); border-style: dashed; }
+  .gate .n { color: var(--gate); }
+  .deploy { border-color: var(--deploy); background: var(--deploy-bg); }
+  .deploy .n { color: var(--deploy); }
+  .par { border: 1.5px solid var(--every); border-radius: 10px; padding: 8px; background: #f6fbff; flex: none; }
+  .par .ph { font-size: 11px; font-weight: 600; color: var(--every); margin: 0 2px 6px; }
+  .par .stage { width: 200px; min-height: 0; padding: 7px 10px; margin-bottom: 6px; }
+  .par .stage:last-child { margin-bottom: 0; }
+  .par .stage .t { font-size: 13px; margin: 0; }
+  .par .stage .d { margin-top: 1px; }
+  .legend { display: flex; gap: 22px; margin-top: 22px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 14px; height: 14px; border-radius: 3px; border: 1.5px solid; display: inline-block; }
+  footer { margin-top: 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Jenkinsfile stages: <code>delivery-app</code></h1>
+    <span class="tag">Diagram of the Jenkinsfile, not a Jenkins screenshot</span>
+  </header>
+
+  <div class="flow">
+    <div class="stage every"><div class="n">1</div><div class="t">Prepare</div><div class="d">git sha, image tag</div></div>
+    <div class="arrow"></div>
+    <div class="stage every"><div class="n">2</div><div class="t">Unit tests</div><div class="d">pytest, JUnit report</div></div>
+    <div class="arrow"></div>
+    <div class="stage every"><div class="n">3</div><div class="t">Build image</div><div class="d">docker build with build identity</div></div>
+    <div class="arrow"></div>
+    <div class="stage every"><div class="n">4</div><div class="t">Image smoke test</div><div class="d">run container, check /version sha</div></div>
+    <div class="arrow"></div>
+    <div class="par">
+      <div class="ph">5 &middot; Validate (parallel, failFast)</div>
+      <div class="stage every"><div class="t">Kubernetes manifests</div><div class="d">kustomize + kubeconform</div></div>
+      <div class="stage every"><div class="t">Terraform: jenkins</div><div class="d">fmt, validate, test</div></div>
+      <div class="stage every"><div class="t">Terraform: web</div><div class="d">fmt, validate, test</div></div>
+      <div class="stage every"><div class="t">Ansible</div><div class="d">syntax-check, ansible-lint</div></div>
+    </div>
+    <div class="arrow"></div>
+    <div class="stage master"><div class="n">6 &middot; master</div><div class="t">Publish image</div><div class="d">push to ECR, immutable tag</div></div>
+    <div class="arrow"></div>
+    <div class="stage master"><div class="n">7 &middot; DEPLOY=true</div><div class="t">Plan web stack</div><div class="d">terraform plan, plan archived</div></div>
+    <div class="arrow"></div>
+    <div class="stage gate"><div class="n">8 &middot; manual gate</div><div class="t">Approve deploy</div><div class="d">release-approvers, 30 min timeout</div></div>
+    <div class="arrow"></div>
+    <div class="stage deploy"><div class="n">9</div><div class="t">Deploy</div><div class="d">apply approved plan, Ansible waits for new sha</div></div>
+  </div>
+
+  <div class="legend">
+    <span><i class="sw" style="border-color:var(--every);background:var(--every-bg)"></i>Every build and pull request (mirrored in GitHub Actions)</span>
+    <span><i class="sw" style="border-color:var(--master);background:var(--master-bg)"></i>master branch only</span>
+    <span><i class="sw" style="border-color:var(--gate);background:var(--gate-bg);border-style:dashed"></i>Human approval</span>
+    <span><i class="sw" style="border-color:var(--deploy);background:var(--deploy-bg)"></i>Changes infrastructure</span>
+  </div>
+  <footer>post: JUnit results and reports/ archived on every run, local image removed, workspace cleaned.</footer>
+</div>
+</body>
+</html>

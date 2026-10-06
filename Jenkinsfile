@@ -119,7 +119,7 @@ pipeline {
                 ansible-playbook -i localhost, --syntax-check provision_web.yaml
               '''
             }
-            sh 'ansible-lint ansible/'
+            sh 'ansible-lint'
           }
         }
       }

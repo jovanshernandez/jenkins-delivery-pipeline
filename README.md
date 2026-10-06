@@ -23,6 +23,10 @@ instance.*
 | --- | --- |
 | ![kubeconform and ansible-lint](docs/images/validate.png) | ![smoke test](docs/images/smoke-test.png) |
 
+GitHub Actions runs the credential-free stages on every push:
+
+![GitHub Actions run](docs/images/actions-run.png)
+
 ## Features
 
 - **Declarative Jenkinsfile** with build identity (`<sha>-<build>` image tags), a

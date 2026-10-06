@@ -1,11 +1,14 @@
+# Local overlay for kind or minikube: uses the image built by `docker build -t delivery-app:local app`.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: delivery-app
 resources:
+  - namespace.yaml
   - ../../base
 images:
-  - name: pipeline-demo
-    newName: pipeline-demo
+  - name: delivery-app
     newTag: local
 labels:
   - pairs:
       app.kubernetes.io/version: local
+    includeTemplates: true

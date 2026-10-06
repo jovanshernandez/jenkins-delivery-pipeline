@@ -1,21 +1,90 @@
 ---
+# Install Docker on the web host and run delivery-app as a systemd service, then
+# verify the deployed build before reporting success.
+#
+#   ansible-playbook -i inventory/aws_ec2.yml provision_web.yaml \
+#     -e app_image=<account>.dkr.ecr.us-east-1.amazonaws.com/delivery-app:<tag> \
+#     -e git_sha=<short sha>
 
-- name: Provision web servers
-  hosts: webservers
-  become: yes
+- name: Provision web host and deploy delivery-app
+  hosts: web
+  become: true
+
+  vars:
+    app_name: delivery-app
+    app_port: 8000
+    app_version: "{{ git_sha }}"
+    build_number: manual
+
+  pre_tasks:
+    - name: Require the image and build identity to deploy
+      ansible.builtin.assert:
+        that:
+          - app_image is defined and ':' in app_image
+          - git_sha is defined and git_sha | length >= 7
+        fail_msg: Pass -e app_image=<repo>:<tag> -e git_sha=<sha>.
+
   tasks:
+    - name: Install Docker and the ECR credential helper
+      ansible.builtin.dnf:
+        name:
+          - docker
+          - amazon-ecr-credential-helper
+        state: present
 
-  - name: Install pip3
-    apt:
-      update_cache: yes
-      name: python3-pip
+    - name: Create root Docker config directory
+      ansible.builtin.file:
+        path: /root/.docker
+        state: directory
+        mode: "0700"
 
-  - name: Install Docker
-    apt:
-      name: docker.io
+    - name: Pull from ECR with the instance role
+      ansible.builtin.copy:
+        dest: /root/.docker/config.json
+        content: '{ "credsStore": "ecr-login" }'
+        mode: "0600"
 
-  - name: Enable and start Docker
-    service:
-      name: docker
-      state: started
-      enabled: yes
+    - name: Enable and start Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Pull the release image
+      ansible.builtin.command:
+        cmd: "docker pull {{ app_image }}"
+      register: pull
+      changed_when: "'Downloaded newer image' in pull.stdout"
+
+    - name: Install the delivery-app systemd unit
+      ansible.builtin.template:
+        src: templates/delivery-app.service.j2
+        dest: "/etc/systemd/system/{{ app_name }}.service"
+        mode: "0644"
+      notify: Restart delivery-app
+
+    - name: Enable delivery-app
+      ansible.builtin.systemd_service:
+        name: "{{ app_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply pending restarts
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the new build to report itself on /version
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/version"
+        return_content: true
+      register: version
+      until: version.status == 200 and version.json.git_sha == git_sha
+      retries: 15
+      delay: 2
+
+  handlers:
+    - name: Restart delivery-app
+      ansible.builtin.systemd_service:
+        name: "{{ app_name }}"
+        state: restarted
+        daemon_reload: true

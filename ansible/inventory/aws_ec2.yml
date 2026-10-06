@@ -1,0 +1,13 @@
+# Dynamic inventory: instances tagged by the Terraform stacks, reached through SSM.
+# Requires the amazon.aws and community.aws collections (requirements.yml) and boto3.
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-east-1
+filters:
+  tag:App: jenkins-delivery-pipeline
+  instance-state-name: running
+hostnames:
+  - instance-id
+keyed_groups:
+  - key: tags.Component
+    separator: ""

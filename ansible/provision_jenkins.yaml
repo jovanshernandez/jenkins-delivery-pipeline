@@ -1,30 +1,117 @@
 ---
+# Configure the Jenkins controller (Amazon Linux 2023, ARM64) with every tool the
+# Jenkinsfile calls: Docker, Python venv, Terraform, kubectl, kubeconform, Ansible
+# and the SSM plugin Ansible needs to reach the web host.
+#
+#   ansible-playbook -i inventory/aws_ec2.yml provision_jenkins.yaml
 
 - name: Configure Jenkins controller
   hosts: jenkins
-  become: yes
+  become: true
+
+  vars:
+    kubectl_version: "1.34.1"
+    kubeconform_version: "0.8.0"
+    tools_dir: /usr/local/bin
+
   tasks:
+    - name: Add the Jenkins package repository
+      ansible.builtin.get_url:
+        url: https://pkg.jenkins.io/redhat-stable/jenkins.repo
+        dest: /etc/yum.repos.d/jenkins.repo
+        mode: "0644"
 
-  - name: Install Java requirements
-    apt:
-      update_cache: yes
-      name: default-jdk
+    - name: Import the Jenkins signing key
+      ansible.builtin.rpm_key:
+        key: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+        state: present
 
-  - name: Add Jenkins apt repository
-    shell: |
-      wget -q -O - https://pkg.jenkins.io/debian-stable/jenkins.io.key | sudo apt-key add -
-      sudo sh -c 'echo deb https://pkg.jenkins.io/debian-stable binary/ > \
-        /etc/apt/sources.list.d/jenkins.list'
-    args:
-      creates: /etc/apt/sources.list.d/jenkins.list
+    - name: Add the HashiCorp package repository
+      ansible.builtin.get_url:
+        url: https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+        dest: /etc/yum.repos.d/hashicorp.repo
+        mode: "0644"
 
-  - name: Install Jenkins
-    apt:
-      update_cache: yes
-      name: jenkins
+    - name: Install Jenkins, Java and build tooling
+      ansible.builtin.dnf:
+        name:
+          - java-21-amazon-corretto-headless
+          - fontconfig
+          - jenkins
+          - git
+          - docker
+          - amazon-ecr-credential-helper
+          - python3
+          - python3-pip
+          - terraform
+        state: present
 
-  - name: Enable and start Jenkins
-    service:
-      name: jenkins
-      state: started
-      enabled: yes
+    - name: Install kubectl
+      ansible.builtin.get_url:
+        url: "https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/arm64/kubectl"
+        checksum: "sha256:https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/arm64/kubectl.sha256"
+        dest: "{{ tools_dir }}/kubectl"
+        mode: "0755"
+
+    - name: Install kubeconform
+      ansible.builtin.unarchive:
+        src: "https://github.com/yannh/kubeconform/releases/download/v{{ kubeconform_version }}/kubeconform-linux-arm64.tar.gz"
+        dest: "{{ tools_dir }}"
+        include: [kubeconform]
+        remote_src: true
+        creates: "{{ tools_dir }}/kubeconform"
+
+    - name: Install the Session Manager plugin used by the aws_ssm connection
+      ansible.builtin.dnf:
+        name: https://s3.amazonaws.com/session-manager-downloads/plugin/latest/linux_arm64/session-manager-plugin.rpm
+        disable_gpg_check: true # AWS publishes this RPM unsigned
+        state: present
+
+    - name: Install Ansible tooling into a dedicated virtualenv
+      ansible.builtin.pip:
+        name:
+          - ansible-core
+          - ansible-lint
+          - boto3
+        virtualenv: /opt/ansible
+        virtualenv_command: python3 -m venv
+
+    - name: Put Ansible tools on PATH
+      ansible.builtin.file:
+        src: "/opt/ansible/bin/{{ item }}"
+        dest: "{{ tools_dir }}/{{ item }}"
+        state: link
+      loop:
+        - ansible-playbook
+        - ansible-galaxy
+        - ansible-lint
+
+    - name: Let the jenkins user run Docker builds
+      ansible.builtin.user:
+        name: jenkins
+        groups: docker
+        append: true
+      notify: Restart Jenkins
+
+    - name: Use the ECR credential helper for docker push
+      ansible.builtin.copy:
+        dest: /var/lib/jenkins/.docker/config.json
+        content: '{ "credsStore": "ecr-login" }'
+        owner: jenkins
+        group: jenkins
+        mode: "0600"
+
+    - name: Enable and start Docker and Jenkins
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - docker
+        - jenkins
+
+  handlers:
+    - name: Restart Jenkins
+      ansible.builtin.systemd_service:
+        name: jenkins
+        state: restarted

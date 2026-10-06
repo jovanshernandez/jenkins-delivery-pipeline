@@ -3,5 +3,9 @@ kind: Kustomization
 resources:
   - deployment.yaml
   - service.yaml
-commonLabels:
-  app.kubernetes.io/part-of: delivery-platform-demo
+  - pdb.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/name: delivery-app
+      app.kubernetes.io/part-of: jenkins-delivery-pipeline
+    includeTemplates: true

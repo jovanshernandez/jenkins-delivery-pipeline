@@ -1,0 +1,7 @@
+---
+offline: true
+exclude_paths:
+  - .venv/
+  - .github/
+  - k8s/
+  - ansible/inventory/

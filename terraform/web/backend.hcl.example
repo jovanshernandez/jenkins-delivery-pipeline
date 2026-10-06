@@ -1,0 +1,5 @@
+bucket       = "my-terraform-state-bucket"
+key          = "jenkins-delivery-pipeline/web.tfstate"
+region       = "us-east-1"
+use_lockfile = true
+encrypt      = true

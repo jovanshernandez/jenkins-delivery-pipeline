@@ -1,12 +1,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: pipeline-demo
-  labels:
-    app.kubernetes.io/name: pipeline-demo
+  name: delivery-app
 spec:
   selector:
-    app.kubernetes.io/name: pipeline-demo
+    app.kubernetes.io/name: delivery-app
   ports:
     - name: http
       port: 80

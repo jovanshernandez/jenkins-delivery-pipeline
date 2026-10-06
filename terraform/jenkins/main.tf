@@ -1,133 +1,129 @@
-terraform {
-  required_version = ">= 1.5.0"
+# Jenkins controller plus the artifacts it publishes: an ECR repository for
+# delivery-app images and a private bucket the Ansible SSM connection uses for
+# file transfer.
 
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+data "aws_caller_identity" "current" {}
+
+data "aws_ssm_parameter" "ami" {
+  name = var.ami_ssm_parameter
+}
+
+resource "aws_ecr_repository" "app" {
+  name                 = "delivery-app"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "app" {
+  repository = aws_ecr_repository.app.name
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Expire untagged images after 7 days"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 7
+        }
+        action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep the newest ${var.image_retention_count} images"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = var.image_retention_count
+        }
+        action = { type = "expire" }
+      },
+    ]
+  })
+}
+
+resource "aws_s3_bucket" "ssm_transfer" {
+  bucket        = "${var.project}-ssm-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_public_access_block" "ssm_transfer" {
+  bucket                  = aws_s3_bucket.ssm_transfer.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "ssm_transfer" {
+  bucket = aws_s3_bucket.ssm_transfer.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
     }
   }
 }
 
-provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
+resource "aws_s3_bucket_lifecycle_configuration" "ssm_transfer" {
+  bucket = aws_s3_bucket.ssm_transfer.id
 
-  default_tags {
-    tags = merge(var.tags, {
-      Project   = "pipeline-demo"
-      Component = "jenkins"
-      ManagedBy = "terraform"
-    })
+  rule {
+    id     = "expire-transfers"
+    status = "Enabled"
+    filter {}
+    expiration {
+      days = 1
+    }
   }
 }
 
-variable "aws_region" {
-  description = "AWS region for the Jenkins controller."
-  type        = string
-  default     = "us-west-2"
-}
+module "controller" {
+  source = "../modules/ssm-host"
 
-variable "aws_profile" {
-  description = "Local AWS CLI profile used for demo deployments."
-  type        = string
-  default     = "default"
-}
+  name             = "${var.project}-jenkins"
+  ami_id           = data.aws_ssm_parameter.ami.insecure_value
+  instance_type    = var.instance_type
+  root_volume_size = 40
 
-variable "name" {
-  description = "Name tag for the Jenkins instance."
-  type        = string
-  default     = "pipeline-demo-jenkins"
-}
-
-variable "ami" {
-  description = "AMI ID for the Jenkins instance."
-  type        = string
-  default     = "ami-08d70e59c07c61a3a"
-}
-
-variable "instance_type" {
-  description = "EC2 instance type for Jenkins."
-  type        = string
-  default     = "t2.micro"
-}
-
-variable "key_name" {
-  description = "EC2 key pair name."
-  type        = string
-  default     = "baxter-devops"
-}
-
-variable "ssh_cidr_blocks" {
-  description = "CIDR blocks allowed to reach SSH."
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
-}
-
-variable "jenkins_cidr_blocks" {
-  description = "CIDR blocks allowed to reach the Jenkins UI."
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
-}
-
-variable "tags" {
-  description = "Additional resource tags."
-  type        = map(string)
-  default     = {}
-}
-
-resource "aws_security_group" "jenkins" {
-  name        = "${var.name}-sg"
-  description = "Jenkins controller ingress"
-
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.ssh_cidr_blocks
-  }
-
-  ingress {
+  ingress = length(var.ui_ingress_cidrs) == 0 ? [] : [{
     description = "Jenkins UI"
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = var.jenkins_cidr_blocks
-  }
+    port        = 8080
+    cidr_blocks = var.ui_ingress_cidrs
+  }]
 
-  egress {
-    description = "Outbound internet access"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_instance" "jenkins" {
-  ami                    = var.ami
-  instance_type          = var.instance_type
-  key_name               = var.key_name
-  vpc_security_group_ids = [aws_security_group.jenkins.id]
-
-  metadata_options {
-    http_endpoint = "enabled"
-    http_tokens   = "required"
-  }
-
-  root_block_device {
-    encrypted   = true
-    volume_size = 30
-    volume_type = "gp3"
-  }
-
-  tags = {
-    Name = var.name
-  }
-}
-
-output "jenkins_public_ip" {
-  description = "Public IP address for the Jenkins controller."
-  value       = aws_instance.jenkins.public_ip
+  # The controller builds and pushes images; it never needs more than this repository.
+  inline_policy_json = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "EcrAuth"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "EcrPushDeliveryApp"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:CompleteLayerUpload",
+          "ecr:DescribeImages",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+        ]
+        Resource = aws_ecr_repository.app.arn
+      },
+    ]
+  })
 }

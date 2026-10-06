@@ -1,42 +1,144 @@
+# Mirrors the Jenkinsfile stages that can run without AWS credentials:
+# Unit tests -> Build image + Image smoke test, and the four Validate branches.
+# Publish, plan, approval and deploy stay in Jenkins.
 name: CI
 
 on:
   pull_request:
   push:
-    branches:
-      - master
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KUBECONFORM_VERSION: "0.8.0"
+  TERRAFORM_VERSION: "1.16.0"
 
 jobs:
-  app:
+  unit-tests:
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements*.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r app/requirements-dev.txt
+
+      - name: pytest
+        run: python -m pytest app --junitxml=reports/junit.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: reports/junit.xml
+
+  image:
+    name: Build image + smoke test
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        run: |
+          sha="$(git rev-parse --short=7 HEAD)"
+          echo "GIT_SHA=$sha" >> "$GITHUB_ENV"
+          docker build --pull \
+            --build-arg APP_VERSION="$sha" \
+            --build-arg GIT_SHA="$sha" \
+            --build-arg BUILD_NUMBER="gha-${{ github.run_number }}" \
+            --tag "delivery-app:$sha" \
+            app
+
+      - name: Image smoke test
+        run: scripts/container-smoke.sh "delivery-app:$GIT_SHA" "$GIT_SHA"
+
+  kubernetes:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+
+      - name: Render and validate
+        run: |
+          mkdir -p reports
+          kubectl kustomize k8s/overlays/local > reports/k8s-local.yaml
+          kubeconform -strict -summary reports/k8s-local.yaml
+
+  terraform:
+    name: Validate Terraform (${{ matrix.stack }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [jenkins, web]
+    defaults:
+      run:
+        working-directory: terraform/${{ matrix.stack }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform test (mocked AWS provider)
+        run: terraform test
+
+  ansible:
+    name: Validate Ansible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        working-directory: docker
-        run: python -m pip install -r requirements.txt
+      - name: Install ansible-core and ansible-lint
+        run: python -m pip install ansible-core==2.21.5 ansible-lint==26.9.0
 
-      - name: Run tests
-        working-directory: docker
-        run: python -m pytest -q
+      - name: Syntax check
+        working-directory: ansible
+        run: |
+          ansible-playbook -i localhost, --syntax-check provision_jenkins.yaml
+          ansible-playbook -i localhost, --syntax-check provision_web.yaml
 
-      - name: Build image
-        run: docker build -t pipeline-demo:ci docker
+      - name: ansible-lint
+        run: ansible-lint ansible/
 
-  manifests:
+  scripts:
+    name: Shellcheck
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Validate Kubernetes manifests
-        run: kubectl kustomize k8s/overlays/local
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
